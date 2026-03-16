@@ -29,6 +29,18 @@ python tg_bot.py
 | `AFDPARTS_LOGIN` | Логин на afdparts.ru |
 | `AFDPARTS_PASSWORD` | Пароль на afdparts.ru |
 | `DEBUG_SAVE_HTML` | `1` — сохранять HTML ответов в файлы для отладки |
+| `TELEGRAM_ORDER_CHAT_ID` | Куда слать уведомления о заявках (по умолчанию 232066339) |
+
+## Деплой на Railway
+
+1. Зарегистрируйтесь на [railway.app](https://railway.app), создайте новый проект.
+2. **New** → **GitHub Repo** → выберите репозиторий с этим ботом (или **Deploy from GitHub** после пуша).
+3. В настройках сервиса задайте **Variables** (переменные окружения):
+   - `BOT_TOKEN` — токен от @BotFather (обязательно);
+   - `AFDPARTS_LOGIN`, `AFDPARTS_PASSWORD` — логин и пароль AFDparts;
+   - `TELEGRAM_ORDER_CHAT_ID` — ID чата для заявок (по умолчанию 232066339).
+4. У бота нет веб-сервера, это **worker**. В **Settings** → **Deploy** задайте **Start Command**: `python tg_bot.py` (если Railway не подхватил `Procfile`).
+5. Запустите деплой. Бот будет работать в облаке и автоматически перезапускаться при сбоях.
 
 ## Установка как аддон Home Assistant OS
 

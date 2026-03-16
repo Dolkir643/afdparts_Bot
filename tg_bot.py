@@ -7,7 +7,7 @@ import re
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ErrorEvent
 
 from parser import AFDPartsParser
 
@@ -465,10 +465,23 @@ async def cb_part_choose(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.error()
+async def error_handler(event: ErrorEvent):
+    """Ловим любые необработанные исключения в хендлерах, чтобы бот не падал."""
+    logging.exception("Необработанная ошибка в обработчике: %s", event.exception)
+
+
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     logging.info("AFDparts бот запущен. Команды (/) не ищутся как артикул.")
-    await dp.start_polling(bot)
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception:
+            logging.exception("Падение polling, перезапуск через 60 с")
+            await asyncio.sleep(60)
+        else:
+            break
 
 
 if __name__ == "__main__":
