@@ -1,0 +1,5 @@
+# Скопируйте этот файл в КОРЕНЬ репозитория на GitHub (если репозиторий только для этого аддона).
+# Если добавляете папку afdparts_bot в уже существующий репозиторий с аддонами — repository.yaml там уже есть, этот файл не нужен.
+name: AFDparts Bot Add-on
+url: https://github.com/USERNAME/REPO
+maintainer: Your Name

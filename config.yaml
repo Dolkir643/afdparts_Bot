@@ -1,0 +1,25 @@
+name: "AFDparts Bot"
+version: "1.0.0"
+slug: "afdparts_bot"
+description: "Telegram-бот для поиска запчастей по артикулу (AFDparts)"
+arch:
+  - amd64
+startup: services
+boot: auto
+init: false
+advanced: true
+
+map:
+  - data:rw
+
+options:
+  bot_token: ""
+  afdparts_login: "i.kiselev@auto-parts.moscow"
+  afdparts_password: "AFDparts2026"
+  telegram_order_chat_id: "232066339"
+
+schema:
+  bot_token: str
+  afdparts_login: str
+  afdparts_password: str
+  telegram_order_chat_id: str
