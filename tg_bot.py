@@ -4,25 +4,38 @@ import logging
 import os
 import re
 
+from aiohttp import ClientTimeout
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ErrorEvent
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from parser import AFDPartsParser
 
 load_dotenv()
 
+BOT_VERSION = "1.0.1"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
 DEBUG_SAVE_HTML = os.getenv("DEBUG_SAVE_HTML", "0").strip().lower() in ("1", "true", "yes")
 TELEGRAM_ORDER_CHAT_ID = os.getenv("TELEGRAM_ORDER_CHAT_ID", "232066339").strip()
+TELEGRAM_PROXY = (os.getenv("TELEGRAM_PROXY") or "").strip() or None  # socks5:// или http://
 
 if not BOT_TOKEN:
     raise SystemExit(
         "Заполните .env: BOT_TOKEN. Создайте бота через @BotFather и укажите токен."
     )
+
+# Увеличенные таймауты для HAOS / прокси; SOCKS5 — нужен пакет aiohttp-socks
+_tg_timeout = ClientTimeout(total=120, connect=90, sock_read=90)
+if TELEGRAM_PROXY:
+    _tg_session = AiohttpSession(proxy=TELEGRAM_PROXY, timeout=_tg_timeout)
+    bot = Bot(token=BOT_TOKEN, session=_tg_session)
+else:
+    bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=_tg_timeout))
 
 # Состояние: ожидание выбора товара при нескольких вариантах по одному артикулу
 user_search_state: dict[int, dict] = {}
@@ -157,7 +170,6 @@ def _flat_shown_items(requested: list, originals: list, analogs: list) -> list[t
 
 ORDER_BTN = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Заказать", callback_data="order_start")]])
 
-bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 parser = AFDPartsParser(
     username=AFDPARTS_LOGIN,
@@ -473,12 +485,29 @@ async def error_handler(event: ErrorEvent):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-    logging.info("AFDparts бот запущен. Команды (/) не ищутся как артикул.")
+    if TELEGRAM_PROXY:
+        _p = TELEGRAM_PROXY.split("://", 1)
+        _proxy_log = f"{_p[0]}://***" if len(_p) == 2 else "***"
+        logging.info("Прокси для Telegram: %s", _proxy_log)
+    else:
+        logging.info("Прокси для Telegram: не задан")
+    logging.info(
+        "AFDparts Bot v%s — поиск по артикулу, заявки; команды (/) не ищутся как артикул",
+        BOT_VERSION,
+    )
+    # Даём контейнеру HAOS время поднять сеть/DNS
+    await asyncio.sleep(20)
     while True:
         try:
             await dp.start_polling(bot)
-        except Exception:
-            logging.exception("Падение polling, перезапуск через 60 с")
+        except TelegramNetworkError as e:
+            logging.warning("Нет связи с Telegram. Повтор через 60 с: %s", e)
+            await asyncio.sleep(60)
+        except (TimeoutError, asyncio.TimeoutError, OSError, ConnectionError) as e:
+            logging.warning("Сетевая ошибка. Повтор через 60 с: %s", e)
+            await asyncio.sleep(60)
+        except Exception as e:
+            logging.exception("Ошибка polling, повтор через 60 с: %s", e)
             await asyncio.sleep(60)
         else:
             break

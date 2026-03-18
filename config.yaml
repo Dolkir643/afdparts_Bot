@@ -1,7 +1,7 @@
 name: "AFDparts Bot"
-version: "1.0.0"
+version: "1.0.1"
 slug: "afdparts_bot"
-description: "Telegram-бот для поиска запчастей по артикулу (AFDparts)"
+description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.1 — прокси для Telegram, retry при сетевых ошибках, таймауты для HAOS."
 arch:
   - amd64
 startup: services
@@ -17,9 +17,11 @@ options:
   afdparts_login: "i.kiselev@auto-parts.moscow"
   afdparts_password: "AFDparts2026"
   telegram_order_chat_id: "232066339"
+  telegram_proxy: ""
 
 schema:
   bot_token: str
   afdparts_login: str
   afdparts_password: str
   telegram_order_chat_id: str
+  telegram_proxy: str?
