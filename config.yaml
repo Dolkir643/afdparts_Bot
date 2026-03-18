@@ -1,7 +1,7 @@
 name: "AFDparts Bot"
-version: "1.0.3"
+version: "1.0.4"
 slug: "afdparts_bot"
-description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.3 — кнопка «Назад», приветствие без повторной авторизации."
+description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.4 — кнопки брендов столбиком."
 arch:
   - amd64
 startup: services

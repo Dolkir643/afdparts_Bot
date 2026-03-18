@@ -15,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.3"
+BOT_VERSION = "1.0.4"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
@@ -211,7 +211,9 @@ def _build_choice_ui(part_number: str, groups_list: list) -> tuple[str, InlineKe
             label = label[:61] + "…"
         lines.append(f"{i+1}. {label}")
         buttons.append(InlineKeyboardButton(text=label, callback_data=f"part_choose_{i}"))
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=[buttons])
+    # Кнопки столбиком — полное название видно
+    rows = [[btn] for btn in buttons]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 dp = Dispatcher()
@@ -450,9 +452,11 @@ async def handle_message(message: types.Message):
                 label = label[:61] + "…"
             choice_lines.append(f"{i+1}. {label}")
             buttons.append(InlineKeyboardButton(text=label, callback_data=f"part_choose_{i}"))
+        # Кнопки столбиком — полное название видно
+        rows = [[btn] for btn in buttons]
         await status_msg.edit_text(
             "\n".join(choice_lines),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
         return
 
