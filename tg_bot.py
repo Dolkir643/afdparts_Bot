@@ -4,7 +4,6 @@ import logging
 import os
 import re
 
-from aiohttp import ClientTimeout
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.1"
+BOT_VERSION = "1.0.2"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
@@ -29,13 +28,21 @@ if not BOT_TOKEN:
         "Заполните .env: BOT_TOKEN. Создайте бота через @BotFather и укажите токен."
     )
 
-# Увеличенные таймауты для HAOS / прокси; SOCKS5 — нужен пакет aiohttp-socks
-_tg_timeout = ClientTimeout(total=120, connect=90, sock_read=90)
+# Как в CarVector Bot (Dolkir643/carvector-bot):
+# timeout сессии — только число (сек). ClientTimeout ломает long polling:
+# bot.session.timeout + polling_timeout → TypeError.
+# SOCKS5: пакет aiohttp-socks.
+TG_HTTP_TIMEOUT = 120.0
 if TELEGRAM_PROXY:
-    _tg_session = AiohttpSession(proxy=TELEGRAM_PROXY, timeout=_tg_timeout)
-    bot = Bot(token=BOT_TOKEN, session=_tg_session)
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=AiohttpSession(proxy=TELEGRAM_PROXY, timeout=TG_HTTP_TIMEOUT),
+    )
 else:
-    bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=_tg_timeout))
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=AiohttpSession(timeout=TG_HTTP_TIMEOUT),
+    )
 
 # Состояние: ожидание выбора товара при нескольких вариантах по одному артикулу
 user_search_state: dict[int, dict] = {}

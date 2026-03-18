@@ -1,7 +1,7 @@
 name: "AFDparts Bot"
-version: "1.0.1"
+version: "1.0.2"
 slug: "afdparts_bot"
-description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.1 — прокси для Telegram, retry при сетевых ошибках, таймауты для HAOS."
+description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.2 — прокси как CarVector (числовой timeout); v1.0.1 retry/HAOS."
 arch:
   - amd64
 startup: services

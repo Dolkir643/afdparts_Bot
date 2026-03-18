@@ -32,7 +32,7 @@ python tg_bot.py
 | `TELEGRAM_ORDER_CHAT_ID` | Куда слать уведомления о заявках (по умолчанию 232066339) |
 | `TELEGRAM_PROXY` | Прокси для Telegram (`socks5://…` или `http://…`). Нужен `aiohttp-socks` для SOCKS5 |
 
-**v1.0.1:** в логах видно версию и статус прокси; увеличенные таймауты; пауза 20 с перед стартом polling (HAOS); повтор при `TelegramNetworkError` / таймаутах.
+**v1.0.2:** таймаут HTTP к Telegram — только **число секунд** (как в [CarVector Bot](https://github.com/Dolkir643/carvector-bot)); иначе long polling падает с `ClientTimeout + int`. **v1.0.1:** прокси, retry, пауза 20 с.
 
 На HAOS, если прокси (например Xray) на том же хосте в LAN: `socks5://192.168.1.115:1080` (порт как у вашего прокси). Из контейнера аддона часто работает `socks5://172.17.0.1:1080`.
 
@@ -61,7 +61,7 @@ python tg_bot.py
    и вся текущая папка должна быть в подпапке `afdparts_bot/` в репозитории.
 3. В Home Assistant: **Настройки** → **Дополнения** → **Магазин дополнений** → ⋮ → **Репозитории** → добавьте URL вашего репозитория.
 4. Обновите список, найдите **AFDparts Bot** → **Установить**.
-5. Во вкладке **Конфигурация** укажите `bot_token` (от @BotFather), при необходимости `afdparts_login`, `afdparts_password`, `telegram_order_chat_id`, **`telegram_proxy`** (например `socks5://192.168.1.115:1080`, если Telegram без прокси не доходит). Сохраните и запустите аддон. В логах должны быть строки `AFDparts Bot v1.0.1` и `Прокси для Telegram: socks5://***`.
+5. Во вкладке **Конфигурация** укажите `bot_token` (от @BotFather), при необходимости `afdparts_login`, `afdparts_password`, `telegram_order_chat_id`, **`telegram_proxy`** (например `socks5://192.168.1.115:1080`, если Telegram без прокси не доходит). Сохраните и запустите аддон. В логах: `AFDparts Bot v1.0.2` и при прокси — `Прокси для Telegram: socks5://***`.
 
 ## Для разработки
 
