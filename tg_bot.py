@@ -15,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.4"
+BOT_VERSION = "1.0.5"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
@@ -125,33 +125,25 @@ def _build_result_text(part_number: str, result: dict, requested: list, original
     lines = [f"🔍 Артикул: {part_number}"]
     if brand:
         lines.append(f"🏷 Бренд: {brand}")
-    lines.extend(["", sep, "📌 Запрашиваемый артикул", sep, ""])
+    # Блок выводим только если в нём есть хотя бы одна позиция
     if req_show:
+        lines.extend(["", sep, "📌 Запрашиваемый артикул", sep, ""])
         for item in req_show:
             lines.extend(_format_item(num, item))
             lines.append("")
             num += 1
-    else:
-        lines.append("   — позиций нет")
-        lines.append("")
-    lines.extend([sep, "📌 Оригинальные замены", sep, ""])
     if orig_show:
+        lines.extend(["", sep, "📌 Оригинальные замены", sep, ""])
         for item in orig_show:
             lines.extend(_format_item(num, item))
             lines.append("")
             num += 1
-    else:
-        lines.append("   — позиций нет")
-        lines.append("")
-    lines.extend([sep, "📌 Аналоги", sep, ""])
     if anlg_show:
+        lines.extend(["", sep, "📌 Аналоги", sep, ""])
         for item in anlg_show:
             lines.extend(_format_item(num, item))
             lines.append("")
             num += 1
-    else:
-        lines.append("   — позиций нет")
-        lines.append("")
     min_price = result.get("min_price")
     if min_price is not None:
         lines.append("═" * 28)
