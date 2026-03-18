@@ -15,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.2"
+BOT_VERSION = "1.0.3"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
@@ -177,6 +177,43 @@ def _flat_shown_items(requested: list, originals: list, analogs: list) -> list[t
 
 ORDER_BTN = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Заказать", callback_data="order_start")]])
 
+# Кнопки под результатом, когда пришли из меню выбора (несколько товаров по артикулу)
+ORDER_AND_BACK_BTN = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="◀ Назад к выбору", callback_data="part_back_choice")],
+        [InlineKeyboardButton(text="📋 Заказать", callback_data="order_start")],
+    ]
+)
+
+
+def _clean_button_label(s: str) -> str:
+    out = (s or "").strip()
+    for x in ("нал.", "нал ", " нал", "нал", "налич.", "налич ", " налич", "налич"):
+        pat = re.compile(re.escape(x), re.I)
+        out = pat.sub(" ", out).strip()
+    return " ".join(out.split())
+
+
+def _build_choice_ui(part_number: str, groups_list: list) -> tuple[str, InlineKeyboardMarkup]:
+    """Текст и кнопки для экрана «Выберите нужный товар» (MANN, UNO, ...)."""
+    lines = [f"По артикулу {part_number} найдено несколько разных товаров. Выберите нужный:", ""]
+    buttons = []
+    for i, group in enumerate(groups_list):
+        first = group[0]
+        brand = _clean_button_label(first.get("brand") or "")
+        desc = _clean_button_label(first.get("description") or "")
+        short = (desc[:40] + "…") if len(desc) > 40 else desc
+        label = f"{brand} — {short}" if brand else (short or f"Вариант {i+1}")
+        label = _clean_button_label(label)
+        if not label or label.lower().replace(".", "").strip() in ("", "нал", "налич"):
+            label = f"Вариант {i+1}"
+        if len(label) > 64:
+            label = label[:61] + "…"
+        lines.append(f"{i+1}. {label}")
+        buttons.append(InlineKeyboardButton(text=label, callback_data=f"part_choose_{i}"))
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
 dp = Dispatcher()
 parser = AFDPartsParser(
     username=AFDPARTS_LOGIN,
@@ -185,10 +222,27 @@ parser = AFDPartsParser(
 )
 
 
+WELCOME_TEXT = (
+    "Привет! 👋\n"
+    "Это бот для поиска запчастей по артикулу.\n\n"
+    "Как это работает:\n\n"
+    "У тебя есть артикул детали (OEM-номер).\n\n"
+    "Ты вводишь его сюда.\n\n"
+    "Я показываю цену, наличие и аналоги.\n\n"
+    "🔢 Пример артикула: 7701045033\n\n"
+    "Введи артикул в поле ввода, чтобы начать."
+)
+
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id if message.from_user else 0
     logging.info("Получен /start от user_id=%s", user_id)
+
+    # Уже авторизованы (другой пользователь уже делал /start) — сразу приветствие
+    if parser.is_authorized:
+        await message.answer(WELCOME_TEXT)
+        return
 
     try:
         auth_msg = await message.answer("🔐 Авторизация на AFDparts.ru...")
@@ -196,17 +250,7 @@ async def cmd_start(message: types.Message):
         auth_result = await loop.run_in_executor(None, parser.authorize)
         if auth_result:
             parser.is_authorized = True
-            await auth_msg.edit_text(
-                "✅ Авторизация успешна!\n\n"
-                "Привет! 👋\n"
-                "Это бот для поиска запчастей по артикулу.\n\n"
-                "Как это работает:\n\n"
-                "У тебя есть артикул детали (OEM-номер).\n\n"
-                "Ты вводишь его сюда.\n\n"
-                "Я показываю цену, наличие и аналоги.\n\n"
-                "🔢 Пример артикула: 7701045033\n\n"
-                "Введи артикул в поле ввода, чтобы начать."
-            )
+            await auth_msg.edit_text("✅ Авторизация успешна!\n\n" + WELCOME_TEXT)
         else:
             hint = "Проверьте AFDPARTS_LOGIN и AFDPARTS_PASSWORD в .env."
             if DEBUG_SAVE_HTML:
@@ -461,7 +505,7 @@ async def cb_part_choose(callback: CallbackQuery):
     if idx < 0 or idx >= len(groups_list):
         await callback.answer("Неверный вариант.", show_alert=True)
         return
-    user_search_state.pop(user_id, None)
+    # Не очищаем user_search_state — нужен для кнопки «Назад к выбору»
     group = groups_list[idx]
     part_number = state.get("part_number", "")
     requested = [it for it in group if it.get("type") == "requested"]
@@ -478,9 +522,30 @@ async def cb_part_choose(callback: CallbackQuery):
     flat_items = _flat_shown_items(requested, originals, analogs)
     user_order_state[user_id] = {"part_number": part_number, "shown_items": flat_items, "step": None}
     try:
-        await callback.message.edit_text(answer, reply_markup=ORDER_BTN)
+        await callback.message.edit_text(answer, reply_markup=ORDER_AND_BACK_BTN)
     except Exception:
-        await callback.message.answer(answer, reply_markup=ORDER_BTN)
+        await callback.message.answer(answer, reply_markup=ORDER_AND_BACK_BTN)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "part_back_choice")
+async def cb_part_back_choice(callback: CallbackQuery):
+    """Возврат к меню выбора вариантов (MANN, UNO...) без повторного поиска."""
+    user_id = callback.from_user.id if callback.from_user else 0
+    state = user_search_state.get(user_id)
+    if not state:
+        await callback.answer("Сессия истекла. Введите артикул заново.", show_alert=True)
+        return
+    part_number = state.get("part_number", "")
+    groups_list = state.get("groups_list") or []
+    if not groups_list:
+        await callback.answer("Нет вариантов для выбора.", show_alert=True)
+        return
+    choice_text, choice_markup = _build_choice_ui(part_number, groups_list)
+    try:
+        await callback.message.edit_text(choice_text, reply_markup=choice_markup)
+    except Exception:
+        await callback.message.answer(choice_text, reply_markup=choice_markup)
     await callback.answer()
 
 
