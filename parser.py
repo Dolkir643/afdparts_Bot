@@ -33,13 +33,19 @@ class AFDPartsParser:
         })
         self.is_authorized = False
 
-    def authorize(self) -> bool:
-        """Вход на сайт: ищем форму входа и отправляем логин/пароль."""
+    def authorize(self, session: requests.Session | None = None) -> bool:
+        """
+        Вход на сайт. Если session не передана — используется self.session и при успехе
+        выставляется self.is_authorized (для обратной совместимости).
+        Временная сессия (отдельный объект) — только для разового запроса под аккаунтом.
+        """
+        sess = session or self.session
+        response = None
         try:
             # Пробуем страницу входа или главную
             for path in ("/login", "/user/login", "/auth", "/"):
                 url = f"{self.BASE_URL}{path}"
-                main = self.session.get(url, timeout=15, headers={"Referer": self.BASE_URL + "/"})
+                main = sess.get(url, timeout=15, headers={"Referer": self.BASE_URL + "/"})
                 if main.status_code != 200:
                     continue
                 soup = BeautifulSoup(main.text, "html.parser")
@@ -52,7 +58,7 @@ class AFDPartsParser:
                 if form and form.get("action"):
                     action = form["action"].strip()
                     post_url = action if action.startswith("http") else urljoin(url, action)
-                response = self.session.post(
+                response = sess.post(
                     post_url,
                     data=login_data,
                     timeout=15,
@@ -63,9 +69,10 @@ class AFDPartsParser:
                     },
                 )
                 if self._check_login_success(response):
-                    self.is_authorized = True
+                    if session is None:
+                        self.is_authorized = True
                     return True
-            if self.debug_save_html:
+            if self.debug_save_html and response is not None:
                 try:
                     with open("debug_afdparts_login.html", "w", encoding="utf-8") as f:
                         f.write(response.text or "")
@@ -210,18 +217,14 @@ class AFDPartsParser:
 
     def search(self, article: str) -> dict | None:
         """
-        Поиск по артикулу. Возвращает словарь:
-        {
-            "part_number": str,
-            "requested": [...],   # Запрашиваемый артикул
-            "originals": [...],   # Оригинальные замены
-            "analogs": [...],     # Аналоги
-            "min_price": float | None,
-        }
-        Каждый элемент: name, code, price, price_text, url, description, availability, warehouse_info, type.
+        Поиск по артикулу без авторизации (публичные цены на сайте).
         """
-        if not self.is_authorized:
-            return None
+        return self._search_with_session(self.session, article)
+
+    def _search_with_session(self, session: requests.Session, article: str) -> dict | None:
+        """
+        Поиск с указанной сессией (анонимной или уже залогиненной).
+        """
         article = (article or "").strip()
         if not article:
             return None
@@ -235,10 +238,57 @@ class AFDPartsParser:
         ]
         for path in search_paths:
             url = f"{self.BASE_URL}{path}" if not path.startswith("http") else path
-            result = self._parse_search_page(url, article)
+            result = self._parse_search_page(url, article, session=session)
             if result is not None:
                 return self._split_by_type(result, article)
             time.sleep(0.3)
+        return None
+
+    def fetch_prices_for_order(self, article: str, selected_item: dict) -> dict:
+        """
+        Отдельная сессия: вход на сайт, повторный поиск, сопоставление позиции.
+        Возвращает цены для менеджера (не для показа клиенту в чате).
+        Ключи: ok, customer_visible_price, site_account_price, purchase_price, error (опц.).
+        """
+        out = {
+            "ok": False,
+            "customer_visible_price": selected_item.get("price"),
+            "site_account_price": None,
+            "purchase_price": None,
+            "error": None,
+        }
+        auth_sess = requests.Session()
+        auth_sess.headers.update({k: v for k, v in self.session.headers.items()})
+        if not self.authorize(session=auth_sess):
+            out["error"] = "auth_failed"
+            return out
+        result = self._search_with_session(auth_sess, article)
+        if not result:
+            out["error"] = "search_failed"
+            return out
+        matched = self._match_item_in_result(result, selected_item)
+        if not matched:
+            out["error"] = "no_match"
+            out["ok"] = True
+            return out
+        out["ok"] = True
+        out["site_account_price"] = matched.get("price")
+        out["purchase_price"] = matched.get("purchase_price")
+        return out
+
+    def _match_item_in_result(self, result: dict, selected: dict) -> dict | None:
+        """Находит ту же позицию в результате авторизованного поиска (артикул + бренд)."""
+        norm_sel = self._normalize_code(selected.get("code") or "")
+        brand_sel = (selected.get("brand") or "").strip().lower()
+        for key in ("requested", "originals", "analogs"):
+            for it in result.get(key) or []:
+                if self._normalize_code(it.get("code") or "") != norm_sel:
+                    continue
+                b = (it.get("brand") or "").strip().lower()
+                if not brand_sel or not b:
+                    return it
+                if brand_sel in b or b in brand_sel or brand_sel[:4] == b[:4]:
+                    return it
         return None
 
     def _split_by_type(self, result: dict, article: str) -> dict:
@@ -273,10 +323,13 @@ class AFDPartsParser:
             "min_price": result.get("min_price"),
         }
 
-    def _parse_search_page(self, url: str, article: str) -> dict | None:
+    def _parse_search_page(
+        self, url: str, article: str, session: requests.Session | None = None
+    ) -> dict | None:
         """Парсит страницу результатов поиска; возвращает структуру result или None."""
         try:
-            resp = self.session.get(url, timeout=15, headers={"Referer": self.BASE_URL + "/"})
+            sess = session or self.session
+            resp = sess.get(url, timeout=15, headers={"Referer": self.BASE_URL + "/"})
             if resp.status_code != 200:
                 return None
             if self.debug_save_html:
@@ -326,6 +379,7 @@ class AFDPartsParser:
                     name = ""
                     code = article
                     price_text = ""
+                    price_texts_in_row: list[str] = []
                     desc = ""
                     availability = ""
                     warehouse_info = ""
@@ -337,7 +391,7 @@ class AFDPartsParser:
                         if link and cell.find("a") == link:
                             name = text or (link.get_text(strip=True))
                         if re.search(r"[\d\s,.]+\s*₽|руб|руб\.|р\.", text, re.I):
-                            price_text = text
+                            price_texts_in_row.append(text)
                         if "артикул" in cell_cls or "code" in cell_cls or "partcode" in cell_cls:
                             code = text or code
                         if "бренд" in cell_cls or "brand" in cell_cls or "resultbrand" in cell_cls or "casebrand" in cell_cls:
@@ -411,7 +465,37 @@ class AFDPartsParser:
                     full_desc = (desc or name or "").strip()
                     if row_manufacturer and row_manufacturer not in full_desc:
                         full_desc = f"{full_desc} {row_manufacturer}".strip()
+                    # Несколько цен в строке: первая — розница/отображаемая, вторая — закуп (под аккаунтом)
+                    if price_texts_in_row:
+                        price_text = price_texts_in_row[0]
+                        purchase_text = price_texts_in_row[1] if len(price_texts_in_row) > 1 else ""
+                    else:
+                        price_text = ""
+                        purchase_text = ""
                     price_val = self.parse_price(price_text) if price_text else None
+                    purchase_val = self.parse_price(purchase_text) if purchase_text else None
+                    # Явная колонка закупа по классу ячейки (если сайт так размечает)
+                    for cell in cells:
+                        cell_cls = str(cell.get("class", "")).lower()
+                        if not any(
+                            k in cell_cls
+                            for k in (
+                                "purchase",
+                                "buyprice",
+                                "buy-price",
+                                "wholesale",
+                                "закуп",
+                                "оптов",
+                                "dealer",
+                                "opt",
+                            )
+                        ):
+                            continue
+                        t = cell.get_text(strip=True)
+                        pv = self.parse_price(t)
+                        if pv is not None:
+                            purchase_val = pv
+                            break
                     href = link.get("href", "") if link else ""
                     full_url = urljoin(self.BASE_URL, href) if href else ""
                     if name or price_val is not None or code != article:
@@ -422,6 +506,7 @@ class AFDPartsParser:
                             "manufacturer": row_manufacturer.strip(),
                             "price": price_val,
                             "price_text": price_text or (f"{price_val:.2f} ₽" if price_val else ""),
+                            "purchase_price": purchase_val,
                             "url": full_url,
                             "description": full_desc,
                             "availability": availability,

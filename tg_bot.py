@@ -15,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.5"
+BOT_VERSION = "1.0.6"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
@@ -232,33 +232,7 @@ WELCOME_TEXT = (
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id if message.from_user else 0
     logging.info("Получен /start от user_id=%s", user_id)
-
-    # Уже авторизованы (другой пользователь уже делал /start) — сразу приветствие
-    if parser.is_authorized:
-        await message.answer(WELCOME_TEXT)
-        return
-
-    try:
-        auth_msg = await message.answer("🔐 Авторизация на AFDparts.ru...")
-        loop = asyncio.get_event_loop()
-        auth_result = await loop.run_in_executor(None, parser.authorize)
-        if auth_result:
-            parser.is_authorized = True
-            await auth_msg.edit_text("✅ Авторизация успешна!\n\n" + WELCOME_TEXT)
-        else:
-            hint = "Проверьте AFDPARTS_LOGIN и AFDPARTS_PASSWORD в .env."
-            if DEBUG_SAVE_HTML:
-                hint += " Ответ сохранён в debug_afdparts_login.html."
-            await auth_msg.edit_text(
-                f"❌ Ошибка авторизации на AFDparts.ru. {hint}\n\n"
-                "Попробуйте /start позже."
-            )
-    except Exception as e:
-        logging.exception("Ошибка в /start: %s", e)
-        try:
-            await message.answer(f"❌ Ошибка: {e}")
-        except Exception:
-            pass
+    await message.answer(WELCOME_TEXT)
 
 
 @dp.message(F.text)
@@ -296,15 +270,32 @@ async def handle_message(message: types.Message):
         price_str = f"{price:.2f} ₽" if price is not None else "—"
         user_name = (message.from_user.username and f"@{message.from_user.username}") or ""
         user_full = message.from_user.full_name or ""
+        loop = asyncio.get_event_loop()
+        mgr_prices = await loop.run_in_executor(
+            None, lambda: parser.fetch_prices_for_order(part_number, selected)
+        )
+        site_price = mgr_prices.get("site_account_price")
+        purchase_price = mgr_prices.get("purchase_price")
+        site_str = f"{site_price:.2f} ₽" if site_price is not None else "—"
+        purchase_str = f"{purchase_price:.2f} ₽" if purchase_price is not None else "—"
         manager_text = (
             "📋 Заявка с бота AFDparts\n\n"
             f"Артикул: {part_number}\n"
             f"Позиция в списке: {num}\n"
             f"Описание: {selected.get('description', '—')}\n"
-            f"Цена: {price_str}\n"
+            f"Цена в боте (без входа на сайт): {price_str}\n"
+            f"Цена под аккаунтом на сайте: {site_str}\n"
+            f"Закупочная: {purchase_str}\n"
             f"Пользователь: {user_full} {user_name}\n"
             f"ID: {user_id}\n"
         )
+        err = mgr_prices.get("error")
+        if err == "auth_failed":
+            manager_text += "\n⚠️ Не удалось войти на сайт — цены под аккаунтом/закуп не подтянуты.\n"
+        elif err == "search_failed":
+            manager_text += "\n⚠️ Повторный поиск под аккаунтом не удался.\n"
+        elif err == "no_match":
+            manager_text += "\n⚠️ Строка в выдаче под аккаунтом не сопоставлена с выбором клиента.\n"
         if phone:
             manager_text += f"Телефон: {phone}\n"
         try:
@@ -332,15 +323,6 @@ async def handle_message(message: types.Message):
         logging.info("Игнор команды как артикула: %r", text)
         await message.answer("Введите артикул для поиска. Команды: /start")
         return
-
-    if not parser.is_authorized:
-        loop = asyncio.get_event_loop()
-        reauth = await loop.run_in_executor(None, parser.authorize)
-        if reauth:
-            parser.is_authorized = True
-        else:
-            await message.answer("❌ Бот не авторизован. Отправьте /start")
-            return
 
     status_msg = await message.answer(f"🔍 Ищу по артикулу {text}...")
     loop = asyncio.get_event_loop()
