@@ -147,6 +147,101 @@ class AFDPartsParser:
         return re.sub(r"[\s\-]", "", (code or "").upper())
 
     @staticmethod
+    def _looks_obfuscated_or_masked_label(s: str) -> bool:
+        """Маскированный «код детали» / заглушки вида «F * * * P» — не использовать как бренд."""
+        if not s or len(s) > 40:
+            return False
+        if "*" in s:
+            return True
+        if re.search(r"^[\d\s\*\.•·]+$", s):
+            return True
+        return False
+
+    @staticmethod
+    def _afd_header_column_map(row) -> dict[str, int] | None:
+        """
+        По строке заголовка таблицы (th/td) — индексы колонок: brand, detail_code, article, manufacturer, description.
+        """
+        cells = row.find_all(["th", "td"])
+        if len(cells) < 2:
+            return None
+        if not row.find("th"):
+            joined = " ".join((c.get_text(strip=True) or "").lower() for c in cells)
+            if "бренд" not in joined and "код" not in joined:
+                return None
+        mapping: dict[str, int] = {}
+        for i, c in enumerate(cells):
+            t = re.sub(r"\s+", " ", (c.get_text(strip=True) or "").lower().replace("ё", "е")).strip()
+            if not t:
+                continue
+            if t == "бренд" or t.startswith("бренд "):
+                mapping["brand"] = i
+            elif t == "brand" or t.startswith("brand "):
+                mapping["brand"] = i
+            elif "код детали" in t or t.endswith("код детали"):
+                mapping["detail_code"] = i
+            elif "detail" in t and "code" in t:
+                mapping["detail_code"] = i
+            elif t == "артикул" or (t.startswith("артикул") and "код" not in t):
+                mapping["article"] = i
+            elif "производитель" in t:
+                mapping["manufacturer"] = i
+            elif "описание" in t:
+                mapping["description"] = i
+            elif "налич" in t or t == "остаток":
+                mapping["availability"] = i
+            elif "склад" in t or "возврат" in t:
+                mapping["warehouse"] = i
+        if "brand" in mapping:
+            return mapping
+        return None
+
+    @staticmethod
+    def _cell_class_is_brand_column(cell_cls: str) -> bool:
+        c = (cell_cls or "").lower()
+        if re.search(r"(part|detail|article|request)p?code", c):
+            return False
+        if "бренд" in c:
+            return True
+        if re.search(r"(^|[-_])brand($|[-_])", c):
+            return True
+        if "resultbrand" in c or "casebrand" in c:
+            return True
+        if re.search(r"brand(?!code|num)", c):
+            return True
+        return False
+
+    @staticmethod
+    def _cell_class_is_article_or_detail_code_column(cell_cls: str) -> bool:
+        """
+        Колонка артикула / кода детали. Не использовать голое вхождение 'code' — оно цепляет лишние ячейки.
+        """
+        c = (cell_cls or "").lower()
+        if AFDPartsParser._cell_class_is_brand_column(cell_cls) and "code" not in c:
+            return False
+        if "артикул" in c:
+            return True
+        if "код" in c and "детал" in c:
+            return True
+        if re.search(
+            r"partcode|partnumber|detailcode|requestarticle|pcode|articlenum|"
+            r"searchresults.*part|resultpart|casepart|detailnum",
+            c,
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _cell_class_is_manufacturer_column(cell_cls: str) -> bool:
+        c = (cell_cls or "").lower()
+        return (
+            "производитель" in c
+            or "manufacturer" in c
+            or "maker" in c
+            or "resultmanufacturer" in c
+        )
+
+    @staticmethod
     def _classify_item_type(code: str, article: str, name: str = "", description: str = "", row_classes: str = "") -> str:
         """
         Классификация: requested (запрашиваемый), original (оригинальная замена), analog (аналог).
@@ -356,6 +451,7 @@ class AFDPartsParser:
             tables = soup.find_all("table", class_=re.compile(r"result|search|product|price|list", re.I))
             for table in tables:
                 use_section_from_headers = False
+                column_map: dict[str, int] | None = None
                 for row in table.find_all("tr"):
                     row_classes = row.get("class") or []
                     row_class = " ".join(row_classes)
@@ -372,6 +468,11 @@ class AFDPartsParser:
                         current_section = "analog"
                         use_section_from_headers = True
                         continue
+                    hm = self._afd_header_column_map(row)
+                    if hm is not None:
+                        column_map = hm
+                        continue
+
                     cells = row.find_all(["td", "th"])
                     if len(cells) < 2:
                         continue
@@ -383,8 +484,30 @@ class AFDPartsParser:
                     desc = ""
                     availability = ""
                     warehouse_info = ""
-                    row_brand = ""
-                    row_brand_raw = ""  # значение из ячейки brand (может оказаться кодом)
+                    row_brand_raw = ""
+                    row_manufacturer_cell = ""
+
+                    def _cell_at(idx_key: str) -> str:
+                        if not column_map or idx_key not in column_map:
+                            return ""
+                        idx = column_map[idx_key]
+                        if idx < 0 or idx >= len(cells):
+                            return ""
+                        return (cells[idx].get_text(strip=True) or "").strip()
+
+                    if column_map:
+                        row_brand_raw = _cell_at("brand")
+                        row_manufacturer_cell = _cell_at("manufacturer")
+                        t_art = _cell_at("article")
+                        t_det = _cell_at("detail_code")
+                        if t_art:
+                            code = t_art
+                        elif t_det:
+                            code = t_det
+                        desc = desc or _cell_at("description")
+                        availability = availability or _cell_at("availability")
+                        warehouse_info = warehouse_info or _cell_at("warehouse")
+
                     for i, cell in enumerate(cells):
                         text = cell.get_text(strip=True)
                         cell_cls = str(cell.get("class", "")).lower()
@@ -392,18 +515,19 @@ class AFDPartsParser:
                             name = text or (link.get_text(strip=True))
                         if re.search(r"[\d\s,.]+\s*₽|руб|руб\.|р\.", text, re.I):
                             price_texts_in_row.append(text)
-                        if "артикул" in cell_cls or "code" in cell_cls or "partcode" in cell_cls:
-                            code = text or code
-                        if "бренд" in cell_cls or "brand" in cell_cls or "resultbrand" in cell_cls or "casebrand" in cell_cls:
-                            row_brand_raw = text or row_brand_raw
-                        if "производитель" in cell_cls or "manufacturer" in cell_cls or "maker" in cell_cls or "resultmanufacturer" in cell_cls:
-                            row_brand = text or row_brand
-                        if "описание" in cell_cls or "description" in cell_cls or "resultdescription" in cell_cls:
-                            desc = text
-                        if "налич" in cell_cls or "availability" in cell_cls or "остаток" in cell_cls or "stock" in cell_cls:
-                            availability = text or availability
-                        if "склад" in cell_cls or "возврат" in cell_cls or "warehouse" in cell_cls or "return" in cell_cls:
-                            warehouse_info = text or warehouse_info
+                        if column_map is None:
+                            if self._cell_class_is_article_or_detail_code_column(cell_cls):
+                                code = text or code
+                            if self._cell_class_is_brand_column(cell_cls):
+                                row_brand_raw = text or row_brand_raw
+                            if self._cell_class_is_manufacturer_column(cell_cls):
+                                row_manufacturer_cell = text or row_manufacturer_cell
+                            if "описание" in cell_cls or "description" in cell_cls or "resultdescription" in cell_cls:
+                                desc = text
+                            if "налич" in cell_cls or "availability" in cell_cls or "остаток" in cell_cls or "stock" in cell_cls:
+                                availability = text or availability
+                            if "склад" in cell_cls or "возврат" in cell_cls or "warehouse" in cell_cls or "return" in cell_cls:
+                                warehouse_info = text or warehouse_info
                     if not availability:
                         for cell in cells:
                             if re.search(r"налич|в наличии|остаток|шт\.|штук", cell.get_text(), re.I):
@@ -416,7 +540,7 @@ class AFDPartsParser:
                                 break
                     if not name and link:
                         name = link.get_text(strip=True)
-                    # Бренд: из ячейки «brand» может прийти код (Z17713) — не считать брендом; нужен название (ZENTPARTS)
+                    # Бренд: из ячейки «Бренд»; «Код детали» / маски (* * *) — не путать с брендом
                     def _looks_like_part_code(s: str) -> bool:
                         if not s or len(s) < 3:
                             return False
@@ -426,22 +550,11 @@ class AFDPartsParser:
                         if s.isdigit() and len(s) <= 15:
                             return True
                         return False
-                    if not row_brand and row_brand_raw and not _looks_like_part_code(row_brand_raw):
-                        row_brand = row_brand_raw.strip()
-                    if not row_brand:
-                        for cell in cells:
-                            t = (cell.get_text(strip=True) or "").strip()
-                            if 4 <= len(t) <= 35 and t.isupper() and re.match(r"^[A-Za-z0-9\s\-]+$", t):
-                                if t != code and t != row_brand_raw and not _looks_like_part_code(t):
-                                    row_brand = t
-                                    break
-                    if not row_brand:
-                        for cell in cells:
-                            t = (cell.get_text(strip=True) or "").strip()
-                            if 4 <= len(t) <= 25 and t.isalpha() and t[0].isupper() and not _looks_like_part_code(t):
-                                if t != code and t != row_brand_raw:
-                                    row_brand = t
-                                    break
+
+                    brand_cand = ""
+                    if row_brand_raw and not _looks_like_part_code(row_brand_raw):
+                        if not self._looks_obfuscated_or_masked_label(row_brand_raw):
+                            brand_cand = row_brand_raw.strip()
                     # Слаг бренда из ссылки в строке (напр. /brand/stellox)
                     brand_slug = ""
                     for a in row.find_all("a", href=True):
@@ -452,15 +565,40 @@ class AFDPartsParser:
                             if slug and slug.lower() != "brand" and slug.lower() != "brandslist":
                                 brand_slug = slug
                                 break
-                    row_brand = self._resolve_brand(row_brand or row_brand_raw, slug=brand_slug)
-                    # Производитель (ZENTPARTS и т.п.) — второй брендообразный текст в строке; добавляем в описание
-                    row_manufacturer = ""
-                    for cell in cells:
-                        t = (cell.get_text(strip=True) or "").strip()
-                        if 4 <= len(t) <= 35 and t.isupper() and re.match(r"^[A-Za-z0-9\s\-]+$", t):
-                            if t != code and not _looks_like_part_code(t) and t != (row_brand or row_brand_raw):
-                                row_manufacturer = t
-                                break
+                    if (not brand_cand or self._looks_obfuscated_or_masked_label(brand_cand)) and brand_slug:
+                        row_brand = self._resolve_brand("", slug=brand_slug)
+                    else:
+                        row_brand = self._resolve_brand(brand_cand, slug=brand_slug)
+
+                    if not row_brand and column_map is None:
+                        for cell in cells:
+                            t = (cell.get_text(strip=True) or "").strip()
+                            if self._looks_obfuscated_or_masked_label(t) or _looks_like_part_code(t):
+                                continue
+                            if 4 <= len(t) <= 35 and t.isupper() and re.match(r"^[A-Za-z0-9\s\-]+$", t):
+                                if t != code and t != row_brand_raw:
+                                    row_brand = self._resolve_brand(t, slug=brand_slug)
+                                    break
+                    if not row_brand and column_map is None:
+                        for cell in cells:
+                            t = (cell.get_text(strip=True) or "").strip()
+                            if self._looks_obfuscated_or_masked_label(t) or _looks_like_part_code(t):
+                                continue
+                            if 4 <= len(t) <= 25 and t.isalpha() and t[0].isupper():
+                                if t != code and t != row_brand_raw:
+                                    row_brand = self._resolve_brand(t, slug=brand_slug)
+                                    break
+                    # Производитель — только в описание, не в поле «бренд»
+                    row_manufacturer = row_manufacturer_cell
+                    if not row_manufacturer and column_map is None:
+                        for cell in cells:
+                            t = (cell.get_text(strip=True) or "").strip()
+                            if self._looks_obfuscated_or_masked_label(t) or _looks_like_part_code(t):
+                                continue
+                            if 4 <= len(t) <= 35 and t.isupper() and re.match(r"^[A-Za-z0-9\s\-]+$", t):
+                                if t != code and t != row_brand_raw and t != row_brand:
+                                    row_manufacturer = t
+                                    break
                     # Описание — полный текст из ячейки; в конец добавляем производителя, если есть
                     full_desc = (desc or name or "").strip()
                     if row_manufacturer and row_manufacturer not in full_desc:
@@ -597,6 +735,13 @@ class AFDPartsParser:
 
             valid_prices = [i["price"] for i in items if i.get("price") is not None]
             min_price = min(valid_prices) if valid_prices else None
+            if page_brand and self._looks_obfuscated_or_masked_label(page_brand):
+                page_brand = ""
+                for it in items:
+                    b = (it.get("brand") or "").strip()
+                    if b and not self._looks_obfuscated_or_masked_label(b):
+                        page_brand = b
+                        break
             return {
                 "part_number": article,
                 "items": items[:50],
