@@ -1,7 +1,7 @@
 name: "AFDparts Bot"
-version: "1.0.7"
+version: "1.0.8"
 slug: "afdparts_bot"
-description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.7 — бренд из колонки «Бренд», не из «Код детали»."
+description: "Telegram-бот поиск запчастей по артикулу (AFDparts). v1.0.8 — сопоставление строки заказа с выдачей под аккаунтом (цена, URL, артикул)."
 arch:
   - amd64
 startup: services

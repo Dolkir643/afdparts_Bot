@@ -361,7 +361,7 @@ class AFDPartsParser:
         if not result:
             out["error"] = "search_failed"
             return out
-        matched = self._match_item_in_result(result, selected_item)
+        matched = self._match_item_in_result(result, selected_item, search_article=article)
         if not matched:
             out["error"] = "no_match"
             out["ok"] = True
@@ -371,19 +371,133 @@ class AFDPartsParser:
         out["purchase_price"] = matched.get("purchase_price")
         return out
 
-    def _match_item_in_result(self, result: dict, selected: dict) -> dict | None:
-        """Находит ту же позицию в результате авторизованного поиска (артикул + бренд)."""
-        norm_sel = self._normalize_code(selected.get("code") or "")
-        brand_sel = (selected.get("brand") or "").strip().lower()
+    def _match_item_in_result(
+        self, result: dict, selected: dict, search_article: str = ""
+    ) -> dict | None:
+        """
+        Находит ту же позицию в выдаче под аккаунтом.
+        У анонимной и авторизованной выдачи в поле code может быть разная колонка
+        («Артикул» vs «Код детали»), поэтому сравниваем также артикул запроса, цену, URL.
+        """
+        items: list[dict] = []
         for key in ("requested", "originals", "analogs"):
-            for it in result.get(key) or []:
-                if self._normalize_code(it.get("code") or "") != norm_sel:
-                    continue
-                b = (it.get("brand") or "").strip().lower()
-                if not brand_sel or not b:
+            items.extend(result.get(key) or [])
+
+        if not items:
+            return None
+
+        art_norm = self._normalize_code((search_article or "").strip())
+        code_norm = self._normalize_code(selected.get("code") or "")
+        brand_sel = (selected.get("brand") or "").strip().lower()
+        sel_price = selected.get("price")
+        sel_url = (selected.get("url") or "").strip()
+        sel_desc = re.sub(
+            r"\s+",
+            " ",
+            (selected.get("description") or "").strip().lower().replace("ё", "е"),
+        )[:80]
+
+        def brand_ok(it: dict) -> bool:
+            b = (it.get("brand") or "").strip().lower()
+            if not brand_sel or not b:
+                return True
+            if brand_sel in b or b in brand_sel:
+                return True
+            if len(brand_sel) >= 4 and len(b) >= 4 and brand_sel[:4] == b[:4]:
+                return True
+            return False
+
+        def item_code_norm(it: dict) -> str:
+            return self._normalize_code(it.get("code") or "")
+
+        def code_row_matches(it: dict) -> bool:
+            ic = item_code_norm(it)
+            if not ic:
+                return False
+            if code_norm and ic == code_norm:
+                return True
+            if art_norm and ic == art_norm:
+                return True
+            return False
+
+        def price_close(it: dict, ref: float | None) -> bool:
+            if ref is None or it.get("price") is None:
+                return False
+            try:
+                return abs(float(it["price"]) - float(ref)) < 0.02
+            except (TypeError, ValueError):
+                return False
+
+        def desc_similar(it: dict) -> bool:
+            if not sel_desc or len(sel_desc) < 12:
+                return True
+            d = re.sub(
+                r"\s+",
+                " ",
+                (it.get("description") or "").strip().lower().replace("ё", "е"),
+            )[:80]
+            if not d:
+                return False
+            return sel_desc in d or d in sel_desc or sel_desc[:40] == d[:40]
+
+        # 1) Код строки = код позиции или артикул запроса; бренд совместим
+        cands = [it for it in items if code_row_matches(it) and brand_ok(it)]
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1 and sel_price is not None:
+            by_price = [it for it in cands if price_close(it, sel_price)]
+            if len(by_price) == 1:
+                return by_price[0]
+            if len(by_price) >= 1:
+                return by_price[0]
+        if len(cands) > 1:
+            return cands[0]
+
+        # 2) Только по коду (без бренда)
+        cands2 = [it for it in items if code_row_matches(it)]
+        if len(cands2) == 1:
+            return cands2[0]
+        if len(cands2) > 1 and sel_price is not None:
+            by_price = [it for it in cands2 if price_close(it, sel_price)]
+            if len(by_price) == 1:
+                return by_price[0]
+            if len(by_price) >= 1:
+                return by_price[0]
+
+        # 3) Тот же URL карточки
+        if sel_url:
+            for it in items:
+                if (it.get("url") or "").strip() == sel_url:
                     return it
-                if brand_sel in b or b in brand_sel or brand_sel[:4] == b[:4]:
-                    return it
+
+        # 4) Однозначное совпадение цены (как у клиента в списке)
+        if sel_price is not None:
+            by_price = [it for it in items if price_close(it, sel_price)]
+            if len(by_price) == 1:
+                return by_price[0]
+            if len(by_price) > 1:
+                by_desc = [it for it in by_price if desc_similar(it)]
+                if len(by_desc) == 1:
+                    return by_desc[0]
+                if brand_ok(by_price[0]):
+                    return by_price[0]
+
+        # 5) Упоминание артикула запроса в тексте строки + цена
+        if art_norm:
+            mention = [
+                it
+                for it in items
+                if art_norm in re.sub(r"\s+", "", (it.get("description") or "").upper())
+                or art_norm in re.sub(r"\s+", "", (it.get("name") or "").upper())
+                or art_norm in re.sub(r"\s+", "", (it.get("code") or "").upper())
+            ]
+            if sel_price is not None:
+                mp = [it for it in mention if price_close(it, sel_price)]
+                if len(mp) == 1:
+                    return mp[0]
+            if len(mention) == 1:
+                return mention[0]
+
         return None
 
     def _split_by_type(self, result: dict, article: str) -> dict:

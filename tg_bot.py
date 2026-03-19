@@ -15,7 +15,7 @@ from parser import AFDPartsParser
 
 load_dotenv()
 
-BOT_VERSION = "1.0.7"
+BOT_VERSION = "1.0.8"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AFDPARTS_LOGIN = os.getenv("AFDPARTS_LOGIN", "i.kiselev@auto-parts.moscow")
 AFDPARTS_PASSWORD = os.getenv("AFDPARTS_PASSWORD", "AFDparts2026")
