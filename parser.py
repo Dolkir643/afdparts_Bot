@@ -1,7 +1,7 @@
 """Парсер AFDparts.ru — авторизация и поиск запчастей по артикулу."""
 import re
 import time
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -127,6 +127,24 @@ class AFDPartsParser:
         if 'name="login"' in response.text and ('name="pass"' in response.text or 'type="password"' in response.text):
             return False
         return False
+
+    @staticmethod
+    def _catalog_url_path(url: str) -> str:
+        """Путь страницы товара без query — стабильная связка аноним/авторизован."""
+        if not (url or "").strip():
+            return ""
+        u = url.strip()
+        if not u.startswith("http"):
+            u = urljoin(AFDPartsParser.BASE_URL, u)
+        p = urlparse(u)
+        return (p.path or "").rstrip("/").lower()
+
+    @staticmethod
+    def _brand_slug_from_url(url: str) -> str:
+        if not url:
+            return ""
+        m = re.search(r"/brand/([^/?#]+)", url, re.I)
+        return (m.group(1) or "").strip().lower() if m else ""
 
     @staticmethod
     def parse_price(price_text: str) -> float | None:
@@ -376,10 +394,8 @@ class AFDPartsParser:
         if not result:
             out["error"] = "search_failed"
             return out
+        # Розница без входа и под аккаунтом на сайте часто разная — строку НЕ ищем по совпадению цены с ботом.
         matched = self._match_item_in_result(result, selected_item, search_article=article)
-        if not matched:
-            # Резерв: одна строка с той же розничной ценой, что видел клиент (закуп парсится из неё же)
-            matched = self._match_item_by_retail_price_only(result, selected_item)
         if not matched:
             out["error"] = "no_match"
             out["ok"] = True
@@ -389,13 +405,21 @@ class AFDPartsParser:
         out["purchase_price"] = matched.get("purchase_price")
         return out
 
+    def _row_text_contains_normalized_article(self, it: dict, art_norm: str) -> bool:
+        """Ищем OEM/артикул запроса в тексте строки (под аккаунтом «код детали» другой)."""
+        if not art_norm:
+            return False
+        blob = f"{it.get('code', '')} {it.get('name', '')} {it.get('description', '')}"
+        return art_norm in re.sub(r"\s", "", blob.upper())
+
     def _match_item_in_result(
         self, result: dict, selected: dict, search_article: str = ""
     ) -> dict | None:
         """
-        Находит ту же позицию в выдаче под аккаунтом.
-        У анонимной и авторизованной выдачи в поле code может быть разная колонка
-        («Артикул» vs «Код детали»), поэтому сравниваем также артикул запроса, цену, URL.
+        Та же физическая строка в выдаче под аккаунтом.
+        Без входа «код детали» часто маска (F * * * P), под аккаунтом — другой код (FE-CLAMP);
+        розница в боте и под аккаунтом тоже может отличаться — не матчим по цене из бота.
+        Опираемся на URL, brand_slug, описание, OEM в тексте строки, совпадение кода где возможно.
         """
         items: list[dict] = []
         for key in ("requested", "originals", "analogs"):
@@ -407,8 +431,9 @@ class AFDPartsParser:
         art_norm = self._normalize_code((search_article or "").strip())
         code_norm = self._normalize_code(selected.get("code") or "")
         brand_sel = (selected.get("brand") or "").strip().lower()
-        sel_price = selected.get("price")
         sel_url = (selected.get("url") or "").strip()
+        path_sel = self._catalog_url_path(sel_url)
+        sel_slug = ((selected.get("brand_slug") or "") or self._brand_slug_from_url(sel_url)).strip().lower()
         sel_desc = re.sub(
             r"\s+",
             " ",
@@ -438,17 +463,9 @@ class AFDPartsParser:
                 return True
             return False
 
-        def price_close(it: dict, ref: float | None) -> bool:
-            if ref is None or it.get("price") is None:
-                return False
-            try:
-                return abs(float(it["price"]) - float(ref)) < 0.02
-            except (TypeError, ValueError):
-                return False
-
         def desc_similar(it: dict) -> bool:
             if not sel_desc or len(sel_desc) < 12:
-                return True
+                return False
             d = re.sub(
                 r"\s+",
                 " ",
@@ -458,86 +475,94 @@ class AFDPartsParser:
                 return False
             return sel_desc in d or d in sel_desc or sel_desc[:40] == d[:40]
 
-        # 1) Код строки = код позиции или артикул запроса; бренд совместим
+        def row_oem(it: dict) -> bool:
+            return self._row_text_contains_normalized_article(it, art_norm)
+
+        # 0) Один и тот же путь карточки (в строке несколько ссылок — сверяем со всеми)
+        if path_sel:
+            for it in items:
+                if self._catalog_url_path(it.get("url") or "") == path_sel:
+                    return it
+                for lp in it.get("link_paths") or []:
+                    if lp == path_sel:
+                        return it
+
+        # 1) Слаг бренда из /brand/... + описание (код детали при анониме не совпадает с авторизованным)
+        if sel_slug:
+            cands = [
+                it
+                for it in items
+                if (it.get("brand_slug") or "").strip().lower() == sel_slug and brand_ok(it)
+            ]
+            if len(sel_desc) >= 12:
+                cands = [it for it in cands if desc_similar(it)]
+            if len(cands) == 1:
+                return cands[0]
+            if len(cands) > 1 and art_norm:
+                c2 = [it for it in cands if row_oem(it)]
+                if len(c2) == 1:
+                    return c2[0]
+            if len(cands) > 1:
+                return cands[0]
+
+        # 2) Только slug + бренд, одна строка или уточнение по OEM
+        if sel_slug:
+            cands = [
+                it
+                for it in items
+                if (it.get("brand_slug") or "").strip().lower() == sel_slug and brand_ok(it)
+            ]
+            if len(cands) == 1:
+                return cands[0]
+            if len(cands) > 1 and art_norm:
+                c2 = [it for it in cands if row_oem(it)]
+                if len(c2) == 1:
+                    return c2[0]
+            if len(cands) > 1:
+                return cands[0]
+
+        # 3) Код строки = выбранный код или артикул запроса
         cands = [it for it in items if code_row_matches(it) and brand_ok(it)]
         if len(cands) == 1:
             return cands[0]
-        if len(cands) > 1 and sel_price is not None:
-            by_price = [it for it in cands if price_close(it, sel_price)]
-            if len(by_price) == 1:
-                return by_price[0]
-            if len(by_price) >= 1:
-                return by_price[0]
+        if len(cands) > 1 and art_norm:
+            c2 = [it for it in cands if row_oem(it)]
+            if len(c2) == 1:
+                return c2[0]
         if len(cands) > 1:
             return cands[0]
 
-        # 2) Только по коду (без бренда)
         cands2 = [it for it in items if code_row_matches(it)]
         if len(cands2) == 1:
             return cands2[0]
-        if len(cands2) > 1 and sel_price is not None:
-            by_price = [it for it in cands2 if price_close(it, sel_price)]
-            if len(by_price) == 1:
-                return by_price[0]
-            if len(by_price) >= 1:
-                return by_price[0]
+        if len(cands2) > 1 and art_norm:
+            c2 = [it for it in cands2 if row_oem(it)]
+            if len(c2) == 1:
+                return c2[0]
 
-        # 3) Тот же URL карточки
+        # 4) Точное совпадение URL строки
         if sel_url:
             for it in items:
                 if (it.get("url") or "").strip() == sel_url:
                     return it
 
-        # 4) Однозначное совпадение цены (как у клиента в списке)
-        if sel_price is not None:
-            by_price = [it for it in items if price_close(it, sel_price)]
-            if len(by_price) == 1:
-                return by_price[0]
-            if len(by_price) > 1:
-                by_desc = [it for it in by_price if desc_similar(it)]
-                if len(by_desc) == 1:
-                    return by_desc[0]
-                if brand_ok(by_price[0]):
-                    return by_price[0]
+        # 5) Однозначное совпадение по описанию + бренд
+        if len(sel_desc) >= 12:
+            cands = [it for it in items if desc_similar(it) and brand_ok(it)]
+            if len(cands) == 1:
+                return cands[0]
+            if len(cands) > 1 and art_norm:
+                c2 = [it for it in cands if row_oem(it)]
+                if len(c2) == 1:
+                    return c2[0]
 
-        # 5) Упоминание артикула запроса в тексте строки + цена
+        # 6) OEM в тексте строки + бренд
         if art_norm:
-            mention = [
-                it
-                for it in items
-                if art_norm in re.sub(r"\s+", "", (it.get("description") or "").upper())
-                or art_norm in re.sub(r"\s+", "", (it.get("name") or "").upper())
-                or art_norm in re.sub(r"\s+", "", (it.get("code") or "").upper())
-            ]
-            if sel_price is not None:
-                mp = [it for it in mention if price_close(it, sel_price)]
-                if len(mp) == 1:
-                    return mp[0]
+            mention = [it for it in items if row_oem(it) and brand_ok(it)]
             if len(mention) == 1:
                 return mention[0]
 
         return None
-
-    def _match_item_by_retail_price_only(self, result: dict, selected: dict) -> dict | None:
-        """Если основной матч не сработал — ровно одна строка с той же розничной ценой (из неё читается закуп)."""
-        ref = selected.get("price")
-        if ref is None:
-            return None
-        try:
-            ref_f = float(ref)
-        except (TypeError, ValueError):
-            return None
-        items: list[dict] = []
-        for key in ("requested", "originals", "analogs"):
-            items.extend(result.get(key) or [])
-        cands = [
-            it
-            for it in items
-            if it.get("price") is not None and abs(float(it["price"]) - ref_f) < 0.02
-        ]
-        if len(cands) != 1:
-            return None
-        return cands[0]
 
     def _split_by_type(self, result: dict, article: str) -> dict:
         """Распределяет items по requested, originals, analogs."""
@@ -869,16 +894,25 @@ class AFDPartsParser:
                                 break
                     href = link.get("href", "") if link else ""
                     full_url = urljoin(self.BASE_URL, href) if href else ""
+                    link_paths: list[str] = []
+                    seen_lp: set[str] = set()
+                    for a in row.find_all("a", href=True):
+                        lp = self._catalog_url_path(urljoin(self.BASE_URL, (a.get("href") or "").strip()))
+                        if lp and lp not in seen_lp:
+                            seen_lp.add(lp)
+                            link_paths.append(lp)
                     if name or price_val is not None or code != article:
                         item = {
                             "name": name or code,
                             "code": code,
                             "brand": row_brand.strip(),
+                            "brand_slug": (brand_slug or "").strip().lower(),
                             "manufacturer": row_manufacturer.strip(),
                             "price": price_val,
                             "price_text": price_text or (f"{price_val:.2f} ₽" if price_val else ""),
                             "purchase_price": purchase_val,
                             "url": full_url,
+                            "link_paths": link_paths,
                             "description": full_desc,
                             "availability": availability,
                             "warehouse_info": warehouse_info,
@@ -916,14 +950,22 @@ class AFDPartsParser:
                     price_val = self.parse_price(price_text)
                     href = link.get("href", "") if link else ""
                     full_url = urljoin(self.BASE_URL, href) if href else ""
+                    slug_card = self._brand_slug_from_url(href or full_url)
                     if name or price_val is not None:
+                        paths_c = []
+                        if full_url:
+                            p0 = self._catalog_url_path(full_url)
+                            if p0:
+                                paths_c.append(p0)
                         items.append({
                             "name": name or code,
                             "code": code,
                             "brand": row_brand,
+                            "brand_slug": slug_card,
                             "price": price_val,
                             "price_text": price_text or (f"{price_val:.2f} ₽" if price_val else ""),
                             "url": full_url,
+                            "link_paths": paths_c,
                             "description": desc,
                             "availability": availability,
                             "warehouse_info": warehouse_info,
@@ -949,12 +991,19 @@ class AFDPartsParser:
                         if re.search(r"склад|возврат возможен|возврат в течении", li_text, re.I):
                             warehouse_info = li_text.strip()[:150]
                         if name and (article.lower() in name.lower() or article.lower() in (href or "").lower() or price_val is not None):
+                            paths_li = []
+                            if full_url:
+                                pl = self._catalog_url_path(full_url)
+                                if pl:
+                                    paths_li.append(pl)
                             items.append({
                                 "name": name,
                                 "code": article,
+                                "brand_slug": self._brand_slug_from_url(href or full_url),
                                 "price": price_val,
                                 "price_text": price_text or (f"{price_val:.2f} ₽" if price_val else ""),
                                 "url": full_url,
+                                "link_paths": paths_li,
                                 "description": "",
                                 "availability": availability,
                                 "warehouse_info": warehouse_info,
