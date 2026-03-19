@@ -186,13 +186,28 @@ class AFDPartsParser:
                 mapping["article"] = i
             elif "производитель" in t:
                 mapping["manufacturer"] = i
-            elif "описание" in t:
+            elif "описание" in t or t.startswith("описание"):
                 mapping["description"] = i
+            # Колонка закупа / опта (не путать с «описание»)
+            elif "закуп" in t or "закупоч" in t:
+                mapping["purchase"] = i
+            elif "оптов" in t:
+                mapping["purchase"] = i
+            elif re.search(r"(^|\s)опт(\s|$)", t) or t == "опт" or t.startswith("опт "):
+                mapping["purchase"] = i
+            elif "вход" in t and "цен" in t:
+                mapping["purchase"] = i
+            elif "purchase" in t or "wholesale" in t or "dealer" in t:
+                mapping["purchase"] = i
+            elif "розниц" in t or ("цен" in t and "закуп" not in t and "опт" not in t and "оптов" not in t):
+                mapping["retail_price"] = i
             elif "налич" in t or t == "остаток":
                 mapping["availability"] = i
             elif "склад" in t or "возврат" in t:
                 mapping["warehouse"] = i
         if "brand" in mapping:
+            return mapping
+        if "purchase" in mapping and ("article" in mapping or "detail_code" in mapping):
             return mapping
         return None
 
@@ -363,6 +378,9 @@ class AFDPartsParser:
             return out
         matched = self._match_item_in_result(result, selected_item, search_article=article)
         if not matched:
+            # Резерв: одна строка с той же розничной ценой, что видел клиент (закуп парсится из неё же)
+            matched = self._match_item_by_retail_price_only(result, selected_item)
+        if not matched:
             out["error"] = "no_match"
             out["ok"] = True
             return out
@@ -500,6 +518,27 @@ class AFDPartsParser:
 
         return None
 
+    def _match_item_by_retail_price_only(self, result: dict, selected: dict) -> dict | None:
+        """Если основной матч не сработал — ровно одна строка с той же розничной ценой (из неё читается закуп)."""
+        ref = selected.get("price")
+        if ref is None:
+            return None
+        try:
+            ref_f = float(ref)
+        except (TypeError, ValueError):
+            return None
+        items: list[dict] = []
+        for key in ("requested", "originals", "analogs"):
+            items.extend(result.get(key) or [])
+        cands = [
+            it
+            for it in items
+            if it.get("price") is not None and abs(float(it["price"]) - ref_f) < 0.02
+        ]
+        if len(cands) != 1:
+            return None
+        return cands[0]
+
     def _split_by_type(self, result: dict, article: str) -> dict:
         """Распределяет items по requested, originals, analogs."""
         items = result.get("items") or []
@@ -624,11 +663,24 @@ class AFDPartsParser:
 
                     for i, cell in enumerate(cells):
                         text = cell.get_text(strip=True)
+                        text_nb = (text or "").replace("\xa0", " ")
                         cell_cls = str(cell.get("class", "")).lower()
                         if link and cell.find("a") == link:
                             name = text or (link.get_text(strip=True))
-                        if re.search(r"[\d\s,.]+\s*₽|руб|руб\.|р\.", text, re.I):
-                            price_texts_in_row.append(text)
+                        # Несколько сумм в одной ячейке: «289 ₽» и «250 ₽»
+                        if re.search(r"[\d\s,.]+\s*₽|руб|руб\.|р\.", text_nb, re.I):
+                            found_pm = list(
+                                re.finditer(
+                                    r"([\d\s,.]+)\s*(?:₽|руб\.?|р\.)",
+                                    text_nb,
+                                    re.I,
+                                )
+                            )
+                            if found_pm:
+                                for m in found_pm:
+                                    price_texts_in_row.append(m.group(0).strip())
+                            else:
+                                price_texts_in_row.append(text_nb.strip())
                         if column_map is None:
                             if self._cell_class_is_article_or_detail_code_column(cell_cls):
                                 code = text or code
@@ -726,28 +778,95 @@ class AFDPartsParser:
                         purchase_text = ""
                     price_val = self.parse_price(price_text) if price_text else None
                     purchase_val = self.parse_price(purchase_text) if purchase_text else None
-                    # Явная колонка закупа по классу ячейки (если сайт так размечает)
-                    for cell in cells:
-                        cell_cls = str(cell.get("class", "")).lower()
-                        if not any(
-                            k in cell_cls
-                            for k in (
-                                "purchase",
-                                "buyprice",
-                                "buy-price",
-                                "wholesale",
-                                "закуп",
-                                "оптов",
-                                "dealer",
-                                "opt",
-                            )
-                        ):
-                            continue
-                        t = cell.get_text(strip=True)
-                        pv = self.parse_price(t)
-                        if pv is not None:
-                            purchase_val = pv
-                            break
+                    # Явные колонки по заголовку таблицы: «Розница» / «Закуп» / «Опт»
+                    if column_map:
+                        if "retail_price" in column_map:
+                            rtxt = _cell_at("retail_price")
+                            if rtxt:
+                                rpv = self.parse_price(rtxt)
+                                if rpv is not None:
+                                    price_val = rpv
+                                    price_text = rtxt
+                        if "purchase" in column_map:
+                            ptxt = _cell_at("purchase")
+                            if ptxt:
+                                ppv = self.parse_price(ptxt)
+                                if ppv is not None:
+                                    purchase_val = ppv
+                    # Явная колонка закупа по классу ячейки
+                    if purchase_val is None:
+                        for cell in cells:
+                            cell_cls = str(cell.get("class", "")).lower()
+                            if not any(
+                                k in cell_cls
+                                for k in (
+                                    "purchase",
+                                    "buyprice",
+                                    "buy-price",
+                                    "wholesale",
+                                    "закуп",
+                                    "закупоч",
+                                    "оптов",
+                                    "оптprice",
+                                    "dealer",
+                                    "dealerprice",
+                                    "netprice",
+                                    "inprice",
+                                )
+                            ):
+                                continue
+                            t = cell.get_text(strip=True)
+                            pv = self.parse_price(t)
+                            if pv is not None:
+                                purchase_val = pv
+                                break
+                    # data-* (часто так отдают закуп в вёрстке)
+                    if purchase_val is None:
+                        _pur_attrs = (
+                            "data-purchase",
+                            "data-purchase-price",
+                            "data-purchasing",
+                            "data-buy-price",
+                            "data-wholesale",
+                            "data-opt-price",
+                            "data-optprice",
+                            "data-dealer-price",
+                            "data-in-price",
+                        )
+                        for cell in cells:
+                            for attr in _pur_attrs:
+                                raw = cell.get(attr)
+                                if not raw:
+                                    continue
+                                pv = self.parse_price(str(raw))
+                                if pv is not None:
+                                    purchase_val = pv
+                                    break
+                            if purchase_val is not None:
+                                break
+                    # title у ячейки («закуп 250…»)
+                    if purchase_val is None:
+                        for cell in cells:
+                            title = (cell.get("title") or "").strip()
+                            if not title:
+                                continue
+                            low = title.lower()
+                            if not any(
+                                k in low
+                                for k in (
+                                    "закуп",
+                                    "опт",
+                                    "закупоч",
+                                    "wholesale",
+                                    "purchase",
+                                    "buy",
+                                )
+                            ):
+                                continue
+                            pv = self.parse_price(title)
+                            if pv is not None:
+                                purchase_val = pv
+                                break
                     href = link.get("href", "") if link else ""
                     full_url = urljoin(self.BASE_URL, href) if href else ""
                     if name or price_val is not None or code != article:
